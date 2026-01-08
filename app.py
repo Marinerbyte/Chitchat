@@ -7,7 +7,10 @@ import websocket
 import ssl
 import requests
 from flask import Flask, render_template_string, request, jsonify
-from openai import OpenAI  # sirf Groq ke liye use kar rahe (compatible)
+from openai import OpenAI
+import textdistance
+from fuzzywuzzy import fuzz
+import emoji
 
 app = Flask(__name__)
 
@@ -22,10 +25,10 @@ CHAT_HISTORY = []
 
 PERSONAS = ["RajBot", "ArjunBot"]
 
-# Groq client (free tier)
+# Groq client (free tier - fast & instant)
 groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
-    api_key=os.environ.get("GROQ_API_KEY")  # Render pe yeh env var set karna
+    api_key=os.environ.get("GROQ_API_KEY")
 )
 
 def perform_login():
@@ -78,42 +81,65 @@ def send_msg(text):
         BOT["ws"].send(json.dumps(pkt))
 
 def simulated_bot_to_bot():
-    conversation = []  # context ke liye
-    last_msg = ""
+    conversation = []      # context ke liye
+    last_msgs = []         # repeat avoid cache
+
     while BOT["should_run"]:
-        time.sleep(random.uniform(5, 16))  # natural gap
+        time.sleep(random.uniform(5, 16))  # real human-like gap
+
         if not BOT["ws"] or not BOT["ws"].sock.connected:
             continue
 
         sender = random.choice(PERSONAS)
-        prompt = f"""You are {sender}, ek mazedaar Hinglish wala banda jo dusre bot se baat kar raha hai.
-        Replies bohot chhote rakh (1-2 line max, random length), bilkul real human jaise, funny, casual, emojis use kar sakta hai.
-        Har baar naya aur different likh, repeat mat karna.
+
+        # Smart prompt for real human feel
+        prompt = f"""You are {sender}, ek normal desi banda jo dost se Hinglish mein baat kar raha hai.
+        Bilkul real aur casual rakh: chhote replies (kabhi 4-5 words, kabhi 1-2 line max).
+        Funny, mast, slang daal sakta hai (bhai, yaar, arre, etc.).
+        Emojis natural tareeke se daal (dil se).
+        Har baar bilkul alag aur fresh likh – repeat mat karna.
         Previous chat:
-        {chr(10).join(conversation[-5:])}
+        {chr(10).join(conversation[-6:])}
         [{sender}]: """
 
         try:
             response = groq_client.chat.completions.create(
-                model="llama3-8b-8192",  # sabse fast free instant model Groq pe
+                model="llama3-8b-8192",  # free, instant, high limits
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=50,           # chhote replies ke liye
-                temperature=1.1,         # zyada random aur mast
-                top_p=0.95
+                max_tokens=60,
+                temperature=1.2,         # zyada random & human
+                top_p=0.92
             )
-            reply_text = response.choices[0].message.content.strip()
+            raw_reply = response.choices[0].message.content.strip()
         except Exception as e:
-            reply_text = f"Yaar thoda wait kar 😅 ({str(e)[:20]})"
+            raw_reply = "Arre yaar thoda wait 😅"
             time.sleep(20)
 
-        msg = f"[{sender}]: {reply_text}"
-        if msg == last_msg:  # rare repeat avoid
-            msg += random.choice([" sahi pakda!", " 😂", " mast!"])
+        # Natural emoji add (random 60% chance)
+        if random.random() < 0.6:
+            raw_reply += " " + random.choice(["😂", "🔥", "😎", "🤣", "💀", "bro", "bhai", "yaar"])
 
+        reply_text = raw_reply
+
+        # Strong repeat check
+        too_similar = False
+        for prev in last_msgs[-6:]:
+            similarity = fuzz.ratio(reply_text.lower(), prev.lower())
+            if similarity > 75 or textdistance.levenshtein.normalized_distance(reply_text, prev) < 0.25:
+                too_similar = True
+                break
+
+        if too_similar:
+            reply_text += random.choice([" sahi pakda!", " 😂 kya baat", " mast bhai", " ab tu bata"])
+
+        msg = f"[{sender}]: {reply_text}"
         send_msg(msg)
         CHAT_HISTORY.append({"sender": sender, "text": msg, "time": time.strftime("%H:%M")})
+
         conversation.append(f"[{sender}]: {reply_text}")
-        last_msg = msg
+        last_msgs.append(reply_text)
+        if len(last_msgs) > 10:
+            last_msgs.pop(0)
 
 # ===================== DASHBOARD =====================
 UI_HTML = """
