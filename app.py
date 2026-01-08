@@ -1,7 +1,6 @@
 import os, json, time, threading, random, websocket, ssl, requests
 from flask import Flask, render_template_string, request, jsonify
 from openai import OpenAI
-from fuzzywuzzy import fuzz
 from datetime import datetime
 
 app = Flask(__name__)
@@ -15,60 +14,35 @@ except: pass
 SYSTEM_STATE = {"password": "", "room_name": "", "running": False}
 LOGS = []
 BOT_INSTANCES = {}
-SESSION_RAM = {}
 
-# ================= 🧠 BRAIN & RECHARGER =================
+# ================= 🧠 REACTION BRAIN =================
 
-def save_memory(bot_name, user, message, role):
-    if user not in SESSION_RAM:
-        SESSION_RAM[user] = {'msgs': [], 'battery': 100.0, 'mood': 'chill'}
-    data = SESSION_RAM[user]
-    if role == "assistant": data['battery'] -= random.uniform(5, 10)
-    data['msgs'].append({"role": role, "content": message})
-    if len(data['msgs']) > 10: data['msgs'].pop(0)
-
-def battery_recharger():
-    while True:
-        time.sleep(60)
-        for u in list(SESSION_RAM.keys()):
-            SESSION_RAM[u]['battery'] = min(100.0, SESSION_RAM[u]['battery'] + 5.0)
-
-threading.Thread(target=battery_recharger, daemon=True).start()
-
-# ================= 🎭 SMART REPLY LOGIC =================
-
-def get_smart_reply(bot_name, target_user, message, is_partner):
-    data = SESSION_RAM.get(target_user, {'battery': 100, 'mood': 'chill', 'msgs': []})
-    
-    # Partner ke liye reply chance 95% (Dono bots ek dusre ke partner hain)
-    reply_chance = 0.95 if is_partner else 0.4
-    if random.random() > reply_chance: return None
-
-    prompt = (
-        f"You are {bot_name}. Talking to your best friend {target_user}. "
-        "Casual Hinglish, short messages, use slang like 'bro', 'yaar', 'sahi h'. "
-        "Don't act like a bot. If you're bored, change the topic."
-    )
-
+def get_smart_reply(bot_name, target_user, message):
+    # Short & Fast Hinglish Prompt
+    prompt = f"Act as {bot_name}. Talk to your best friend {target_user}. Use short, casual Hinglish. No AI tone. Just 1 line reply."
     try:
         resp = groq_client.chat.completions.create(
             model="llama3-8b-instant",
-            messages=[{"role": "system", "content": prompt}] + data['msgs'][-6:],
-            max_tokens=50, temperature=1.2
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": message}],
+            max_tokens=40, temperature=1.0
         )
-        reply = resp.choices[0].message.content.strip().replace(f"{bot_name}:", "").replace('"', '')
-        return reply if len(reply) > 1 else None
-    except: return "Aur bata?"
+        return resp.choices[0].message.content.strip()
+    except: return random.choice(["Kya hua?", "Hnji", "Batao", "Sahi h"])
 
-# ================= 🤖 SMART BOT CLASS =================
+# ================= 🤖 STABLE BOT CLASS =================
 
-class SmartBot:
+class StableBot:
     def __init__(self, username, partner_name):
-        self.username, self.partner, self.token, self.ws, self.room_id = username, partner_name, None, None, None
-        self.ua = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        self.username = username
+        self.partner = partner_name
+        self.token = None
+        self.ws = None
+        self.room_id = None
+        self.ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
 
     def log(self, msg, type="INFO"):
-        LOGS.append(f"[{datetime.now().strftime('%H:%M:%S')}] [{type}] [{self.username}] {msg}")
+        t = datetime.now().strftime("%H:%M:%S")
+        LOGS.append(f"[{t}] [{type}] [{self.username}] {msg}")
 
     def login(self):
         try:
@@ -79,104 +53,135 @@ class SmartBot:
             return True if self.token else False
         except: return False
 
+    def heartbeat(self):
+        """Pings the server every 30s to prevent 'Left Room' disconnection"""
+        while self.ws and self.ws.sock and self.ws.sock.connected:
+            time.sleep(30)
+            try: self.ws.send(json.dumps({"handler": "ping"}))
+            except: break
+
     def on_open(self, ws):
-        self.log("Socket Open", "NET")
+        self.log("Socket Connected", "NET")
+        # Step 1: Login to handler
         ws.send(json.dumps({"handler": "login", "username": self.username, "password": SYSTEM_STATE['password']}))
-        time.sleep(3)
+        time.sleep(2)
+        # Step 2: Join Room
         ws.send(json.dumps({"handler": "joinchatroom", "name": SYSTEM_STATE['room_name'], "roomPassword": ""}))
+        # Start heartbeat
+        threading.Thread(target=self.heartbeat, daemon=True).start()
 
     def on_message(self, ws, msg):
         if not SYSTEM_STATE['running']: return
         try:
             d = json.loads(msg)
-            if d.get("handler") == "joinchatroom": 
+            # Handle Room ID
+            if d.get("handler") == "joinchatroom" and d.get("roomid"):
                 self.room_id = d.get("roomid")
                 self.log(f"In Room: {self.room_id}", "SUCCESS")
-                # ICEBREAKER: Sirf pehla bot conversation start karega
+                # Bot 1 will start conversation
                 if "1" in [k for k, v in BOT_INSTANCES.items() if v == self]:
-                    threading.Thread(target=self.kickstart).start()
+                    threading.Thread(target=self.initial_message).start()
 
+            # Handle Chat Messages
             if d.get("handler") in ["chatroommessage", "message"]:
-                sender, text = d.get("from") or d.get("username"), d.get("text", "")
+                sender = d.get("from") or d.get("username")
+                text = d.get("text", "")
                 if not sender or sender == self.username: return
                 
-                is_partner = (sender == self.partner)
-                save_memory(self.username, sender, text, "user")
-                threading.Thread(target=self.process_reply, args=(sender, text, is_partner)).start()
+                # Check if partner spoke or bot was mentioned
+                if sender == self.partner or self.username.lower() in text.lower():
+                    self.log(f"Received from {sender}: {text}", "RECV")
+                    threading.Thread(target=self.process_response, args=(sender, text)).start()
         except: pass
 
-    def kickstart(self):
-        """Room join karte hi pehla message bhejna"""
-        time.sleep(10)
+    def initial_message(self):
+        time.sleep(8) # Wait for Bot 2 to join
         if self.room_id and SYSTEM_STATE['running']:
-            msg = random.choice([f"Aur @{self.partner} kya scene?", "Bada sannata hai yahan..", "Koi hai?"])
-            self.send_msg(msg)
+            self.send_chat(f"Aur @{self.partner}, kaisa hai?")
 
-    def process_reply(self, sender, text, is_partner):
-        time.sleep(random.uniform(4, 8)) # Thinking time
-        reply = get_smart_reply(self.username, sender, text, is_partner)
+    def process_response(self, sender, text):
+        # Natural thinking delay
+        time.sleep(random.uniform(3, 6))
+        reply = get_smart_reply(self.username, sender, text)
         if reply and SYSTEM_STATE['running']:
-            # Typing signal
-            ws_msg = {"handler": "starttyping", "roomid": self.room_id}
-            self.ws.send(json.dumps(ws_msg))
-            time.sleep(len(reply) * 0.1) # Typing speed
-            self.send_msg(reply)
+            self.send_chat(reply)
 
-    def send_msg(self, text):
+    def send_chat(self, text):
         if self.ws and self.room_id:
-            payload = {"handler": "chatroommessage", "type": "text", "roomid": self.room_id, "text": text}
-            self.ws.send(json.dumps(payload))
-            save_memory(self.username, self.partner, text, "assistant")
-            self.log(f"Sent: {text}", "CHAT")
+            try:
+                # Show typing for realism
+                self.ws.send(json.dumps({"handler": "starttyping", "roomid": self.room_id}))
+                time.sleep(len(text) * 0.1)
+                # Send message
+                payload = {"handler": "chatroommessage", "type": "text", "roomid": self.room_id, "text": text}
+                self.ws.send(json.dumps(payload))
+                self.log(f"Replied: {text}", "CHAT")
+            except: self.log("Failed to send msg", "ERROR")
 
     def connect(self):
-        if not self.login(): return
-        def run():
-            self.ws = websocket.WebSocketApp(f"wss://app.howdies.app/howdies?token={self.token}",
-                header={"User-Agent": self.ua}, on_open=self.on_open, on_message=self.on_message)
+        if not self.login(): 
+            self.log("Login Failed", "AUTH")
+            return
+        def run_ws():
+            self.ws = websocket.WebSocketApp(
+                f"wss://app.howdies.app/howdies?token={self.token}",
+                header={"User-Agent": self.ua},
+                on_open=self.on_open, on_message=self.on_message,
+                on_close=lambda ws, a, b: self.handle_disconnect()
+            )
             self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run_ws, daemon=True).start()
 
-# ================= ⚡ FLASK =================
+    def handle_disconnect(self):
+        if SYSTEM_STATE['running']:
+            self.log("Disconnected! Rejoining...", "RETRY")
+            time.sleep(3)
+            self.connect()
+
+# ================= ⚡ FLASK UI =================
 
 @app.route('/cmd', methods=['POST'])
 def cmd():
     d = request.json
     if d['a'] == 'start':
         SYSTEM_STATE.update({"password": d['p'], "room_name": d['r'], "running": True})
-        BOT_INSTANCES["1"] = SmartBot(d['u1'], d['u2'])
-        BOT_INSTANCES["2"] = SmartBot(d['u2'], d['u1'])
+        BOT_INSTANCES["1"] = StableBot(d['u1'], d['u2'])
+        BOT_INSTANCES["2"] = StableBot(d['u2'], d['u1'])
         BOT_INSTANCES["1"].connect()
-        time.sleep(5)
+        time.sleep(4)
         BOT_INSTANCES["2"].connect()
         return jsonify({"msg": "Bots launching..."})
-    elif d['a'] == 'stop':
+    if d['a'] == 'stop':
         SYSTEM_STATE['running'] = False
-        return jsonify({"msg": "Stopped"})
+        return jsonify({"msg": "Stopping..."})
     return jsonify({"msg": "Error"})
 
 @app.route('/logs')
-def get_logs(): return jsonify({"logs": LOGS[-20:]})
+def get_logs(): return jsonify({"logs": LOGS[-25:]})
 
 @app.route('/')
 def index():
     return render_template_string("""
     <body style="background:#000;color:#0f0;font-family:monospace;padding:20px">
-        <h3>🚀 Bot Icebreaker Active</h3>
-        <input id="u1" placeholder="User 1"> <input id="u2" placeholder="User 2">
-        <input id="p" type="password" placeholder="Pass"> <input id="r" placeholder="Room">
-        <button onclick="send('start')">START</button>
-        <div id="logs" style="margin-top:20px;border:1px solid #333;padding:10px;height:300px;overflow:auto"></div>
+        <h2>Howdies Stable Bot V5.2</h2>
+        <input id="u1" placeholder="Bot 1"> <input id="u2" placeholder="Bot 2"> <br>
+        <input id="p" type="password" placeholder="Pass"> <input id="r" placeholder="Room Name"> <br><br>
+        <button onclick="act('start')" style="padding:10px;background:#0f0">START BOTS</button>
+        <div id="l" style="margin-top:20px;border:1px solid #333;height:400px;overflow:auto;padding:10px;font-size:12px"></div>
         <script>
-            function send(a){
+            function act(a){
                 fetch('/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
                 body:JSON.stringify({a:a,u1:document.getElementById('u1').value,u2:document.getElementById('u2').value,p:document.getElementById('p').value,r:document.getElementById('r').value})})
             }
-            setInterval(()=>{
-                fetch('/logs').then(r=>r.json()).then(d=>{
-                    document.getElementById('logs').innerHTML = d.logs.join('<br>');
+            setInterval(() => {
+                fetch('/logs').then(r=>r.json()).then(d => {
+                    document.getElementById('l').innerHTML = d.logs.map(log => {
+                        let col = log.includes('SUCCESS') ? 'yellow' : (log.includes('CHAT') ? 'cyan' : 'white');
+                        return `<div style="color:${col}">${log}</div>`;
+                    }).join('');
+                    document.getElementById('l').scrollTop = 999999;
                 })
-            },2000);
+            }, 1500);
         </script>
     </body>
     """)
