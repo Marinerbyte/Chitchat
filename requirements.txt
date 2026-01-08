@@ -1,9 +1,7 @@
-flask==3.0.3
-websocket-client==1.8.0
-requests==2.32.3
-openai==1.57.0
-gunicorn==23.0.0
-textdistance==4.6.0
-fuzzywuzzy==0.18.0
-python-Levenshtein==0.26.1  # fuzzywuzzy ke liye fast backend
-emoji==2.14.0
+flask
+requests
+websocket-client
+openai
+fuzzywuzzy
+python-Levenshtein
+textdistance
