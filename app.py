@@ -104,7 +104,7 @@ def simulated_bot_to_bot():
 
         try:
             response = groq_client.chat.completions.create(
-                model="llama3-8b-8192",  # free, instant, high limits
+                model="llama3-8b-instant",  # free, instant, high limits
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=60,
                 temperature=1.2,         # zyada random & human
