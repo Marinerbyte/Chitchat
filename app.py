@@ -11,40 +11,40 @@ try:
     groq_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=GROQ_API_KEY)
 except: pass
 
-# Global States
-BRAIN = {"lock": threading.Lock(), "last_msg_time": 0, "room_id": None}
 SYSTEM_STATE = {"password": "", "room_name": "", "running": False, "status": "Offline"}
 LOGS = []
 BOTS = {"1": None, "2": None}
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
-]
+# Professional Headers to bypass detection
+BASE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Origin": "https://howdies.app",
+    "Referer": "https://howdies.app/"
+}
 
 # ================= 🧠 AI BRAIN =================
 
 def get_ai_reply(bot_name, user, msg):
     try:
-        prompt = f"Act as {bot_name}. Reply to {user} in 1 short Hinglish line. Be casual, use emojis like 😂, 😎. No bot talk."
+        prompt = f"Act as {bot_name}. Friend of {user}. Short 1-line Hinglish reply. No formal AI talk."
         resp = groq_client.chat.completions.create(
             model="llama3-8b-instant",
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": msg}],
             max_tokens=40, temperature=1.1
         )
         return resp.choices[0].message.content.strip()
-    except: return random.choice(["Hmm", "Sahi h", "Theek h", "😂"])
+    except: return random.choice(["Hmm", "Aur bata?", "Sahi hai", "😂"])
 
-# ================= 🤖 MIRROR BOT ENGINE =================
+# ================= 🤖 GHOST BOT ENGINE =================
 
-class MirrorBot:
+class GhostBot:
     def __init__(self, name, partner):
         self.name = name
         self.partner = partner
         self.ws = None
         self.token = None
-        self.ua = random.choice(USER_AGENTS)
         self.active = False
+        self.room_id = None
 
     def log(self, msg, tag="INFO"):
         t = datetime.now().strftime("%H:%M:%S")
@@ -52,21 +52,41 @@ class MirrorBot:
 
     def login(self):
         try:
+            self.log("Bypassing API Auth...", "AUTH")
             r = requests.post("https://api.howdies.app/api/login", 
                 json={"username": self.name, "password": SYSTEM_STATE['password']}, 
-                headers={"User-Agent": self.ua}, timeout=10)
-            data = r.json()
-            self.token = data.get("token") or data.get("data", {}).get("token")
+                headers=BASE_HEADERS, timeout=15)
+            
+            if r.status_code == 403:
+                self.log("IP Blocked by App (Render IP issue)", "CRITICAL")
+                return False
+            
+            res = r.json()
+            self.token = res.get("token") or res.get("data", {}).get("token")
             return True if self.token else False
-        except: return False
+        except Exception as e:
+            self.log(f"Login Error: {str(e)}", "ERROR")
+            return False
+
+    def on_open(self, ws):
+        self.log("Tunnel Open. Sending Credentials...", "NET")
+        # Step 1: Login Handler
+        ws.send(json.dumps({"handler": "login", "username": self.name, "password": SYSTEM_STATE['password']}))
+        
+        # Step 2: Random Delay for Room Join (Real user behavior)
+        def join():
+            time.sleep(random.uniform(5, 10))
+            if self.active:
+                self.log(f"Requesting Room: {SYSTEM_STATE['room_name']}", "NET")
+                ws.send(json.dumps({"handler": "joinchatroom", "name": SYSTEM_STATE['room_name'], "roomPassword": ""}))
+        threading.Thread(target=join, daemon=True).start()
 
     def on_message(self, ws, msg):
         try:
             d = json.loads(msg)
-            if d.get("handler") == "joinchatroom":
-                BRAIN["room_id"] = d.get("roomid")
-                self.active = True
-                self.log("Joined Room", "LIVE")
+            if d.get("handler") == "joinchatroom" and d.get("roomid"):
+                self.room_id = d.get("roomid")
+                self.log("Vibe Check Passed. Room Active.", "LIVE")
             
             if d.get("handler") in ["chatroommessage", "message"]:
                 sender, text = d.get("from") or d.get("username"), d.get("text", "")
@@ -76,170 +96,126 @@ class MirrorBot:
         except: pass
 
     def reply_logic(self, sender, text):
-        time.sleep(random.uniform(3, 7))
+        time.sleep(random.uniform(4, 8))
         reply = get_ai_reply(self.name, sender, text)
-        if self.ws and self.active:
-            self.ws.send(json.dumps({"handler": "starttyping", "roomid": BRAIN["room_id"]}))
-            time.sleep(len(reply) * 0.1)
-            self.ws.send(json.dumps({"handler": "chatroommessage", "type": "text", "roomid": BRAIN["room_id"], "text": reply}))
-            self.log(f"Replied: {reply}", "CHAT")
+        if self.ws and self.room_id:
+            try:
+                self.ws.send(json.dumps({"handler": "starttyping", "roomid": self.room_id}))
+                time.sleep(len(reply) * 0.1)
+                self.ws.send(json.dumps({"handler": "chatroommessage", "type": "text", "roomid": self.room_id, "text": reply}))
+                self.log(f"Replied: {reply}", "CHAT")
+            except: pass
 
     def connect(self):
-        if not self.login(): return self.log("Login Failed", "ERROR")
+        if not self.login(): return
+        self.active = True
         
         def run():
+            # WS Headers are critical for Howdies detection
+            headers = [f"User-Agent: {BASE_HEADERS['User-Agent']}", f"Origin: {BASE_HEADERS['Origin']}"]
             self.ws = websocket.WebSocketApp(
                 f"wss://app.howdies.app/howdies?token={self.token}",
-                header={"User-Agent": self.ua},
-                on_open=lambda ws: (
-                    ws.send(json.dumps({"handler": "login", "username": self.name, "password": SYSTEM_STATE['password']})),
-                    time.sleep(4),
-                    ws.send(json.dumps({"handler": "joinchatroom", "name": SYSTEM_STATE['room_name'], "roomPassword": ""}))
-                ),
+                header=headers,
+                on_open=self.on_open,
                 on_message=self.on_message,
+                on_error=lambda ws, e: self.log(f"Socket Loss: {e}", "NET"),
                 on_close=lambda ws, a, b: self.reconnect()
             )
-            self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=40)
+            self.ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_interval=30, ping_timeout=10)
         
         threading.Thread(target=run, daemon=True).start()
 
     def reconnect(self):
-        if SYSTEM_STATE['running']:
-            self.active = False
-            time.sleep(10)
+        if SYSTEM_STATE['running'] and self.active:
+            self.log("Ghosting failed. Retrying Tunnel...", "RETRY")
+            time.sleep(random.uniform(10, 20))
             self.connect()
 
-    def disconnect(self):
+    def stop(self):
         self.active = False
         if self.ws: self.ws.close()
 
-# ================= ⚡ FLASK CONTROL =================
+# ================= ⚡ CONTROL PANEL =================
 
 @app.route('/cmd', methods=['POST'])
 def cmd():
     data = request.json
-    action = data.get('a')
-    
-    if action == 'start':
+    a = data.get('a')
+    if a == 'start':
         SYSTEM_STATE.update({"password": data['p'], "room_name": data['r'], "running": True, "status": "Connecting..."})
-        BOTS["1"] = MirrorBot(data['u1'], data['u2'])
-        BOTS["2"] = MirrorBot(data['u2'], data['u1'])
+        BOTS["1"] = GhostBot(data['u1'], data['u2'])
+        BOTS["2"] = GhostBot(data['u2'], data['u1'])
         BOTS["1"].connect()
-        threading.Timer(15, BOTS["2"].connect).start()
-        return jsonify({"status": "Sequence Started"})
-
-    if action == 'logout':
+        threading.Timer(12, BOTS["2"].connect).start()
+        return jsonify({"s": "ok"})
+    if a == 'logout':
         SYSTEM_STATE['running'] = False
         SYSTEM_STATE['status'] = "Offline"
-        if BOTS["1"]: BOTS["1"].disconnect()
-        if BOTS["2"]: BOTS["2"].disconnect()
-        LOGS.clear() # Wipe Terminal
-        return jsonify({"status": "Logged Out & Wiped"})
-
-    return jsonify({"status": "Error"})
+        if BOTS["1"]: BOTS["1"].stop()
+        if BOTS["2"]: BOTS["2"].stop()
+        LOGS.clear()
+        return jsonify({"s": "wiped"})
+    return jsonify({"s": "err"})
 
 @app.route('/logs')
 def get_logs():
+    s = SYSTEM_STATE['status']
     if SYSTEM_STATE['running']:
-        SYSTEM_STATE['status'] = "Active" if (BOTS["1"] and BOTS["1"].active) else "Connecting..."
-    return jsonify({"logs": LOGS[-20:], "status": SYSTEM_STATE['status']})
+        s = "Connected" if (BOTS["1"] and BOTS["1"].room_id) else "Handshaking..."
+    return jsonify({"logs": LOGS[-25:], "status": s})
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_DASHBOARD)
+    return render_template_string(UI)
 
-# ================= 🎨 MODERN UI =================
+# ================= 🎨 UI =================
 
-HTML_DASHBOARD = """
+UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Aura-Link V7 Dashboard</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GHOST BOT V8</title>
     <style>
-        :root { --main: #00ff41; --bg: #050505; --card: #0f0f0f; }
-        body { background: var(--bg); color: #fff; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }
-        .grid { max-width: 800px; margin: auto; }
-        .card { background: var(--card); border: 1px solid #222; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-        .status-bar { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid var(--main); padding-bottom: 10px; }
-        .dot { height: 10px; width: 10px; background: #555; border-radius: 50%; display: inline-block; margin-right: 5px; }
-        .online .dot { background: var(--main); box-shadow: 0 0 10px var(--main); }
-        input { background: #000; border: 1px solid #333; color: #fff; padding: 12px; border-radius: 4px; width: 100%; box-sizing: border-box; margin-top: 10px; }
-        .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
-        button { padding: 15px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn-start { background: var(--main); color: #000; }
-        .btn-logout { background: #ff003c; color: #fff; }
-        button:hover { opacity: 0.8; }
-        #terminal { background: #000; border: 1px solid #111; height: 300px; overflow-y: auto; padding: 15px; font-family: 'Courier New', monospace; font-size: 13px; color: var(--main); border-radius: 4px; }
-        .tag-CHAT { color: #00f2ff; } .tag-ERROR { color: #ff003c; } .tag-LIVE { color: var(--main); font-weight: bold; }
+        body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
+        .card { border: 1px solid #222; padding: 20px; background: #050505; margin-bottom: 20px; }
+        .status { font-weight: bold; color: yellow; margin-bottom: 10px; }
+        input { background: #111; border: 1px solid #333; color: #fff; padding: 10px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+        button { padding: 15px; width: 48%; cursor: pointer; border: none; font-weight: bold; }
+        .start { background: #0f0; color: #000; }
+        .wipe { background: #f00; color: #fff; }
+        #log { height: 350px; overflow: auto; border: 1px solid #111; padding: 10px; font-size: 12px; }
+        .tag-LIVE { color: #0f0; border: 1px solid #0f0; padding: 1px 3px; }
+        .tag-CHAT { color: cyan; } .tag-CRITICAL { color: white; background: red; }
     </style>
 </head>
 <body>
-    <div class="grid">
-        <div class="card status-bar" id="status-card">
-            <h2 style="margin:0; font-size: 18px;">AURA-LINK V7</h2>
-            <div id="stat-text"><span class="dot"></span> Offline</div>
+    <div class="card">
+        <div class="status">System Status: <span id="st">Offline</span></div>
+        <input id="u1" placeholder="Bot 1 Name">
+        <input id="u2" placeholder="Bot 2 Name">
+        <input id="p" type="password" placeholder="Password">
+        <input id="r" placeholder="Room Name">
+        <div style="display: flex; justify-content: space-between; margin-top:10px;">
+            <button class="start" onclick="act('start')">GHOST CONNECT</button>
+            <button class="wipe" onclick="act('logout')">LOGOUT & WIPE</button>
         </div>
-
-        <div class="card">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                <input id="u1" placeholder="Bot 1 Username">
-                <input id="u2" placeholder="Bot 2 Username">
-            </div>
-            <input id="p" type="password" placeholder="Account Password">
-            <input id="r" placeholder="Room Name">
-            
-            <div class="btn-group">
-                <button class="btn-start" onclick="run('start')">START ENGINE</button>
-                <button class="btn-logout" onclick="run('logout')">LOGOUT & WIPE</button>
-            </div>
-        </div>
-
-        <div id="terminal"></div>
     </div>
-
+    <div id="log" class="card"></div>
     <script>
-        function run(a){
-            const data = {
-                a: a, 
-                u1: document.getElementById('u1').value,
-                u2: document.getElementById('u2').value,
-                p: document.getElementById('p').value,
-                r: document.getElementById('r').value
-            };
-            fetch('/cmd', {
-                method: 'POST', 
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(data)
-            });
-            if(a === 'logout') {
-                document.getElementById('terminal').innerHTML = '';
-            }
+        function act(a){
+            fetch('/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({a:a,u1:document.getElementById('u1').value,u2:document.getElementById('u2').value,p:document.getElementById('p').value,r:document.getElementById('r').value})});
         }
-
-        setInterval(() => {
-            fetch('/logs').then(r => r.json()).then(d => {
-                const term = document.getElementById('terminal');
-                const stat = document.getElementById('status-card');
-                const statText = document.getElementById('stat-text');
-
-                // Update Status UI
-                if(d.status === "Active") {
-                    stat.classList.add('online');
-                    statText.innerHTML = '<span class="dot"></span> Online';
-                } else {
-                    stat.classList.remove('online');
-                    statText.innerHTML = '<span class="dot"></span> ' + d.status;
-                }
-
-                // Update Terminal
-                term.innerHTML = d.logs.map(l => {
-                    const tag = l.split(']')[1]?.trim().split(' ')[0].replace('[','');
-                    return `<div class="tag-${tag}">${l}</div>`;
+        setInterval(()=>{
+            fetch('/logs').then(r=>r.json()).then(d=>{
+                document.getElementById('st').innerText = d.status;
+                document.getElementById('log').innerHTML = d.logs.map(l => {
+                    let tag = l.split(']')[1]?.trim().split(' ')[0].replace('[','');
+                    return `<div style="margin-bottom:4px"><span class="tag-${tag}">${tag}</span> ${l.split(']')[3] || l}</div>`;
                 }).join('');
-                term.scrollTop = term.scrollHeight;
-            });
-        }, 2000);
+                document.getElementById('log').scrollTop = 99999;
+            })
+        }, 1500);
     </script>
 </body>
 </html>
