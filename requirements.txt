@@ -1,8 +1,6 @@
 flask
-gunicorn
-openai
 requests
 websocket-client
-psycopg2-binary
-fuzzywuzzy
-python-Levenshtein
+groq
+gunicorn
+python-dotenv
