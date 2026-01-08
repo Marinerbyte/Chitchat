@@ -5,3 +5,4 @@ openai
 fuzzywuzzy
 python-Levenshtein
 textdistance
+emoji
